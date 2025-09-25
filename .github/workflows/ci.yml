@@ -61,12 +61,40 @@ jobs:
     - name: Setup ChromeDriver
       if: matrix.browser == 'chrome'
       run: |
-        python -c "from webdriver_manager.chrome import ChromeDriverManager; ChromeDriverManager().install()"
+        python -c "
+        from webdriver_manager.chrome import ChromeDriverManager
+        import os
+        driver_path = ChromeDriverManager().install()
+        print(f'ChromeDriver installed at: {driver_path}')
+        
+        # Ensure proper permissions
+        os.chmod(driver_path, 0o755)
+        
+        # Add to PATH
+        driver_dir = os.path.dirname(driver_path)
+        current_path = os.environ.get('PATH', '')
+        if driver_dir not in current_path:
+            os.environ['PATH'] = f'{driver_dir}:{current_path}'
+        "
         
     - name: Setup GeckoDriver for Firefox
       if: matrix.browser == 'firefox'
       run: |
-        python -c "from webdriver_manager.firefox import GeckoDriverManager; GeckoDriverManager().install()"
+        python -c "
+        from webdriver_manager.firefox import GeckoDriverManager
+        import os
+        driver_path = GeckoDriverManager().install()
+        print(f'GeckoDriver installed at: {driver_path}')
+        
+        # Ensure proper permissions
+        os.chmod(driver_path, 0o755)
+        
+        # Add to PATH
+        driver_dir = os.path.dirname(driver_path)
+        current_path = os.environ.get('PATH', '')
+        if driver_dir not in current_path:
+            os.environ['PATH'] = f'{driver_dir}:{current_path}'
+        "
     
     - name: Create directories for reports
       run: |
@@ -77,8 +105,12 @@ jobs:
         BROWSER: ${{ matrix.browser }}
         HEADLESS: true
         DISPLAY: :99
+        WDM_LOG_LEVEL: '0'
+        WDM_PRINT_FIRST_LINE: false
+        WDM_LOCAL: true
       run: |
         Xvfb :99 -ac -screen 0 1280x1024x16 &
+        sleep 2
         pytest tests/ \
           --browser=${{ matrix.browser }} \
           --headless \
