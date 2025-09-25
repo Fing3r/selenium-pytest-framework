@@ -34,6 +34,25 @@ jobs:
         restore-keys: |
           ${{ runner.os }}-pip-
     
+    - name: Clean up any existing processes and cache
+      run: |
+        # Kill any existing browser processes to avoid conflicts
+        pkill -f firefox || true
+        pkill -f chrome || true
+        pkill -f geckodriver || true
+        pkill -f chromedriver || true
+        pkill -f "Xvfb" || true
+        
+        # Clear all WebDriver Manager caches to ensure fresh downloads
+        rm -rf ~/.wdm
+        rm -rf ~/.cache/selenium
+        rm -rf /tmp/.wdm
+        
+        # Wait for processes to terminate
+        sleep 2
+        
+        echo "Process cleanup and cache clearing completed"
+    
     - name: Install system dependencies
       run: |
         sudo apt-get update
@@ -55,15 +74,27 @@ jobs:
     - name: Install Firefox
       if: matrix.browser == 'firefox'
       run: |
-        # Install Firefox from Mozilla's official repository for latest version
-        wget -q -O - https://packages.mozilla.org/apt/repo-signing-key.gpg | sudo apt-key add -
-        echo "deb https://packages.mozilla.org/apt mozilla main" | sudo tee /etc/apt/sources.list.d/mozilla.list
-        sudo apt-get update
-        sudo apt-get install -y firefox
+        # Remove any existing Firefox installations to avoid conflicts
+        sudo apt-get remove -y firefox firefox-esr
+        sudo apt-get autoremove -y
+        
+        # Install Firefox from snap for better CI compatibility
+        sudo snap install firefox
+        
+        # Create symlink for standard firefox command
+        sudo ln -sf /snap/bin/firefox /usr/bin/firefox
+        
         # Verify Firefox installation and version
-        firefox --version
-        # Create Firefox profile directory to avoid permission issues
+        firefox --version || echo "Firefox installation verification failed"
+        
+        # Create Firefox profile directory with proper permissions
         mkdir -p ~/.mozilla/firefox
+        chmod 755 ~/.mozilla/firefox
+        
+        # Set Firefox environment variables for headless mode
+        echo "MOZ_HEADLESS=1" >> $GITHUB_ENV
+        echo "MOZ_DISABLE_CONTENT_SANDBOX=1" >> $GITHUB_ENV
+        echo "MOZ_CRASHREPORTER_DISABLE=1" >> $GITHUB_ENV
     
     - name: Install WebDriver Manager and dependencies
       run: |
@@ -98,28 +129,91 @@ jobs:
         python -c "
         from webdriver_manager.chrome import ChromeDriverManager
         import os
+        import glob
         
-        # Let WebDriver Manager handle everything with default behavior
-        driver_path = ChromeDriverManager().install()
-        print(f'ChromeDriver installed at: {driver_path}')
+        # Get the ChromeDriver installation directory
+        manager = ChromeDriverManager()
+        driver_path = manager.install()
+        print(f'WebDriver Manager returned: {driver_path}')
         
-        # Verify it's the actual binary, not a documentation file
-        if not os.access(driver_path, os.X_OK):
-            print(f'Warning: {driver_path} is not executable')
-        
+        # If the returned path is a documentation file, find the actual binary
         if 'THIRD_PARTY_NOTICES' in driver_path or not driver_path.endswith(('chromedriver', 'chromedriver.exe')):
-            print(f'Error: Path points to documentation, not driver: {driver_path}')
+            print('Returned path is not the actual driver, searching for chromedriver binary...')
+            
+            # Get the directory containing the driver
+            driver_dir = os.path.dirname(driver_path)
+            print(f'Searching in directory: {driver_dir}')
+            
+            # Look for the actual chromedriver binary in the same directory
+            possible_paths = [
+                os.path.join(driver_dir, 'chromedriver'),
+                os.path.join(driver_dir, 'chromedriver.exe'),
+                os.path.join(driver_dir, '..', 'chromedriver'),
+                os.path.join(driver_dir, '..', 'chromedriver.exe')
+            ]
+            
+            # Also search using glob patterns
+            glob_patterns = [
+                os.path.join(driver_dir, '**/chromedriver'),
+                os.path.join(driver_dir, '**/chromedriver.exe'),
+                os.path.join(os.path.dirname(driver_dir), '**/chromedriver'),
+                os.path.join(os.path.dirname(driver_dir), '**/chromedriver.exe')
+            ]
+            
+            actual_driver_path = None
+            
+            # Check direct paths first
+            for path in possible_paths:
+                if os.path.exists(path) and os.access(path, os.X_OK):
+                    actual_driver_path = path
+                    break
+            
+            # If not found, use glob search
+            if not actual_driver_path:
+                for pattern in glob_patterns:
+                    matches = glob.glob(pattern, recursive=True)
+                    for match in matches:
+                        if os.access(match, os.X_OK) and 'THIRD_PARTY_NOTICES' not in match:
+                            actual_driver_path = match
+                            break
+                    if actual_driver_path:
+                        break
+            
+            if actual_driver_path:
+                print(f'Found actual ChromeDriver at: {actual_driver_path}')
+                driver_path = actual_driver_path
+            else:
+                print('Error: Could not find actual ChromeDriver binary')
+                print('Available files in directory:')
+                for root, dirs, files in os.walk(driver_dir):
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        print(f'  {file_path} (executable: {os.access(file_path, os.X_OK)})')
+                exit(1)
+        
+        # Final verification
+        if not os.access(driver_path, os.X_OK):
+            print(f'Error: ChromeDriver at {driver_path} is not executable')
             exit(1)
         
-        print('ChromeDriver setup completed successfully')
+        if 'THIRD_PARTY_NOTICES' in driver_path:
+            print(f'Error: Still pointing to documentation file: {driver_path}')
+            exit(1)
+        
+        print(f'ChromeDriver setup completed successfully at: {driver_path}')
         "
         
     - name: Setup GeckoDriver for Firefox
       if: matrix.browser == 'firefox'
       run: |
+        # Clear any existing GeckoDriver processes
+        pkill -f geckodriver || true
+        
         python -c "
         from webdriver_manager.firefox import GeckoDriverManager
         import os
+        import subprocess
+        import time
         
         # Let WebDriver Manager handle everything with default behavior
         driver_path = GeckoDriverManager().install()
@@ -128,6 +222,7 @@ jobs:
         # Verify it's the actual binary
         if not os.access(driver_path, os.X_OK):
             print(f'Warning: {driver_path} is not executable')
+            os.chmod(driver_path, 0o755)
         
         if not driver_path.endswith(('geckodriver', 'geckodriver.exe')):
             print(f'Error: Path does not point to driver binary: {driver_path}')
@@ -135,28 +230,82 @@ jobs:
         
         print('GeckoDriver setup completed successfully')
         "
-        # Test GeckoDriver can start Firefox in headless mode
-        timeout 30 python -c "
+        
+        # Test Firefox startup with comprehensive error handling
+        echo "Testing Firefox startup with enhanced configuration..."
+        timeout 60 python -c "
         from selenium import webdriver
         from selenium.webdriver.firefox.options import Options
         from selenium.webdriver.firefox.service import Service
         from webdriver_manager.firefox import GeckoDriverManager
+        import os
+        import time
         
+        # Enhanced Firefox options for CI stability
         options = Options()
         options.add_argument('--headless')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
         options.add_argument('--disable-gpu')
+        options.add_argument('--disable-software-rasterizer')
+        options.add_argument('--disable-background-timer-throttling')
+        options.add_argument('--disable-renderer-backgrounding')
+        options.add_argument('--disable-backgrounding-occluded-windows')
         
-        service = Service(GeckoDriverManager().install())
+        # Critical Firefox preferences for CI environments
+        options.set_preference('marionette.log.level', 'Trace')
+        options.set_preference('remote.log.level', 'Trace')
+        options.set_preference('webdriver.log.level', 'trace')
         
-        print('Testing Firefox startup...')
-        driver = webdriver.Firefox(service=service, options=options)
-        driver.get('about:blank')
-        print('Firefox started successfully!')
-        driver.quit()
-        print('Firefox test completed successfully')
-        " || echo "Firefox test failed - will rely on xvfb-run wrapper"
+        # Network and security preferences
+        options.set_preference('network.http.connection-timeout', 60)
+        options.set_preference('network.http.connection-retry-timeout', 60)
+        options.set_preference('dom.max_script_run_time', 0)
+        options.set_preference('dom.max_chrome_script_run_time', 0)
+        
+        # Disable features that can cause startup issues
+        options.set_preference('browser.sessionstore.resume_from_crash', False)
+        options.set_preference('browser.crashReports.unsubmittedCheck.autoSubmit2', False)
+        options.set_preference('browser.tabs.crashReporting.sendReport', False)
+        
+        # Memory and performance settings
+        options.set_preference('browser.cache.disk.enable', False)
+        options.set_preference('browser.cache.memory.enable', False)
+        options.set_preference('browser.cache.offline.enable', False)
+        options.set_preference('network.http.use-cache', False)
+        
+        # Create service with enhanced logging
+        service = Service(
+            executable_path=GeckoDriverManager().install(),
+            log_path='/tmp/geckodriver.log'
+        )
+        
+        try:
+            print('Creating Firefox WebDriver instance...')
+            driver = webdriver.Firefox(service=service, options=options)
+            
+            print('Setting timeouts...')
+            driver.set_page_load_timeout(60)
+            driver.implicitly_wait(20)
+            
+            print('Testing navigation...')
+            driver.get('about:blank')
+            
+            print('Firefox WebDriver test successful!')
+            driver.quit()
+            print('Firefox cleanup completed')
+            
+        except Exception as e:
+            print(f'Firefox test failed with error: {e}')
+            # Print GeckoDriver logs for debugging
+            try:
+                with open('/tmp/geckodriver.log', 'r') as f:
+                    print('GeckoDriver logs:')
+                    print(f.read())
+            except:
+                print('Could not read GeckoDriver logs')
+            exit(1)
+        " || echo "Firefox test failed - continuing with xvfb-run fallback"
     
     - name: Create directories for reports
       run: |
