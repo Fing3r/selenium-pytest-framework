@@ -162,10 +162,11 @@ jobs:
             
             actual_driver_path = None
             
-            # Check direct paths first
+            # Check direct paths first (including non-executable files)
             for path in possible_paths:
-                if os.path.exists(path) and os.access(path, os.X_OK):
+                if os.path.exists(path) and 'THIRD_PARTY_NOTICES' not in path and path.endswith(('chromedriver', 'chromedriver.exe')):
                     actual_driver_path = path
+                    print(f'Found potential ChromeDriver at: {path}')
                     break
             
             # If not found, use glob search
@@ -173,15 +174,36 @@ jobs:
                 for pattern in glob_patterns:
                     matches = glob.glob(pattern, recursive=True)
                     for match in matches:
-                        if os.access(match, os.X_OK) and 'THIRD_PARTY_NOTICES' not in match:
+                        if 'THIRD_PARTY_NOTICES' not in match and match.endswith(('chromedriver', 'chromedriver.exe')):
                             actual_driver_path = match
+                            print(f'Found ChromeDriver via glob: {match}')
                             break
                     if actual_driver_path:
                         break
             
             if actual_driver_path:
                 print(f'Found actual ChromeDriver at: {actual_driver_path}')
-                driver_path = actual_driver_path
+                
+                # Make the driver executable regardless of current permissions
+                print(f'Setting executable permissions on: {actual_driver_path}')
+                os.chmod(actual_driver_path, 0o755)
+                
+                # Verify it's now executable
+                if os.access(actual_driver_path, os.X_OK):
+                    print('ChromeDriver is now executable')
+                    driver_path = actual_driver_path
+                else:
+                    print('Warning: ChromeDriver still not executable after chmod')
+                    # Try alternative permission setting
+                    import stat
+                    current_perms = os.stat(actual_driver_path).st_mode
+                    os.chmod(actual_driver_path, current_perms | stat.S_IEXEC | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+                    if os.access(actual_driver_path, os.X_OK):
+                        print('ChromeDriver is now executable after alternative chmod')
+                        driver_path = actual_driver_path
+                    else:
+                        print('Error: Could not make ChromeDriver executable')
+                        exit(1)
             else:
                 print('Error: Could not find actual ChromeDriver binary')
                 print('Available files in directory:')
@@ -190,6 +212,10 @@ jobs:
                         file_path = os.path.join(root, file)
                         print(f'  {file_path} (executable: {os.access(file_path, os.X_OK)})')
                 exit(1)
+        else:
+            # Even if the path looks correct, ensure it's executable
+            print(f'Ensuring ChromeDriver is executable: {driver_path}')
+            os.chmod(driver_path, 0o755)
         
         # Final verification
         if not os.access(driver_path, os.X_OK):
