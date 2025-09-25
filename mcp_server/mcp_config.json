@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "selenium-pytest-assistant": {
+      "command": "python",
+      "args": ["mcp_server/server.py"],
+      "cwd": ".",
+      "env": {}
+    }
+  }
+}

@@ -1,0 +1,317 @@
+name: Selenium PyTest Multi-Browser Testing
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chrome, firefox, edge]
+        python-version: ['3.9', '3.10', '3.11', '3.12']
+    
+    name: Test on ${{ matrix.browser }} with Python ${{ matrix.python-version }}
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v4
+      with:
+        python-version: ${{ matrix.python-version }}
+    
+    - name: Cache pip dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y wget unzip xvfb
+    
+    - name: Install Chrome
+      if: matrix.browser == 'chrome'
+      run: |
+        wget -q -O - https://dl-ssl.google.com/linux/linux_signing_key.pub | sudo apt-key add -
+        echo 'deb [arch=amd64] http://dl.google.com/linux/chrome/deb/ stable main' | sudo tee /etc/apt/sources.list.d/google-chrome.list
+        sudo apt-get update
+        sudo apt-get install -y google-chrome-stable
+        
+    - name: Install Firefox
+      if: matrix.browser == 'firefox'
+      run: |
+        sudo apt-get install -y firefox
+        
+    - name: Install Edge
+      if: matrix.browser == 'edge'
+      run: |
+        curl https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > microsoft.gpg
+        sudo install -o root -g root -m 644 microsoft.gpg /etc/apt/trusted.gpg.d/
+        sudo sh -c 'echo "deb [arch=amd64,arm64,armhf signed-by=/etc/apt/trusted.gpg.d/microsoft.gpg] https://packages.microsoft.com/repos/edge stable main" > /etc/apt/sources.list.d/microsoft-edge-dev.list'
+        sudo apt-get update
+        sudo apt-get install -y microsoft-edge-stable
+    
+    - name: Install WebDriver Manager and dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install webdriver-manager
+        pip install -r requirements.txt
+    
+    - name: Setup ChromeDriver
+      if: matrix.browser == 'chrome'
+      run: |
+        python -c "from webdriver_manager.chrome import ChromeDriverManager; ChromeDriverManager().install()"
+        
+    - name: Setup GeckoDriver for Firefox
+      if: matrix.browser == 'firefox'
+      run: |
+        python -c "from webdriver_manager.firefox import GeckoDriverManager; GeckoDriverManager().install()"
+        
+    - name: Setup EdgeDriver
+      if: matrix.browser == 'edge'
+      run: |
+        python -c "from webdriver_manager.microsoft import EdgeChromiumDriverManager; EdgeChromiumDriverManager().install()"
+    
+    - name: Create directories for reports
+      run: |
+        mkdir -p reports screenshots allure-results
+    
+    - name: Run tests with pytest
+      env:
+        BROWSER: ${{ matrix.browser }}
+        HEADLESS: true
+        DISPLAY: :99
+      run: |
+        Xvfb :99 -ac -screen 0 1280x1024x16 &
+        pytest tests/ \
+          --browser=${{ matrix.browser }} \
+          --headless \
+          --junit-xml=reports/junit-report-${{ matrix.browser }}-py${{ matrix.python-version }}.xml \
+          --html=reports/test-report-${{ matrix.browser }}-py${{ matrix.python-version }}.html \
+          --self-contained-html \
+          --json-report \
+          --json-report-file=reports/json-report-${{ matrix.browser }}-py${{ matrix.python-version }}.json \
+          --alluredir=allure-results \
+          --cov=pages --cov=utilities \
+          --cov-report=xml:reports/coverage-${{ matrix.browser }}-py${{ matrix.python-version }}.xml \
+          --cov-report=html:reports/coverage-html-${{ matrix.browser }}-py${{ matrix.python-version }} \
+          -v
+    
+    - name: Generate Allure Report
+      if: always()
+      run: |
+        pip install allure-pytest
+        # Install Allure command line tool
+        wget https://github.com/allure-framework/allure2/releases/download/2.24.0/allure-2.24.0.tgz
+        tar -zxvf allure-2.24.0.tgz
+        sudo mv allure-2.24.0 /opt/allure
+        sudo ln -s /opt/allure/bin/allure /usr/bin/allure
+        allure generate allure-results --clean -o reports/allure-report-${{ matrix.browser }}-py${{ matrix.python-version }}
+    
+    - name: Upload test reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-reports-${{ matrix.browser }}-py${{ matrix.python-version }}
+        path: |
+          reports/
+          screenshots/
+        retention-days: 30
+    
+    - name: Upload coverage to Codecov
+      if: matrix.browser == 'chrome' && matrix.python-version == '3.11'
+      uses: codecov/codecov-action@v3
+      with:
+        file: reports/coverage-chrome-py3.11.xml
+        flags: unittests
+        name: codecov-umbrella
+        fail_ci_if_error: false
+
+  # Aggregate job to collect all test results
+  test-summary:
+    needs: test
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download all artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: artifacts
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.11'
+    
+    - name: Install dependencies for report aggregation
+      run: |
+        pip install jinja2 lxml beautifulsoup4
+    
+    - name: Generate aggregated test report
+      run: |
+        python -c "
+        import json
+        import glob
+        import os
+        from pathlib import Path
+        
+        # Collect all JSON reports
+        all_results = []
+        for json_file in glob.glob('artifacts/*/reports/*json-report*.json'):
+            try:
+                with open(json_file, 'r') as f:
+                    data = json.load(f)
+                    browser = json_file.split('json-report-')[1].split('-py')[0]
+                    python_ver = json_file.split('-py')[1].split('.json')[0]
+                    data['browser'] = browser
+                    data['python_version'] = python_ver
+                    all_results.append(data)
+            except Exception as e:
+                print(f'Error processing {json_file}: {e}')
+        
+        # Generate summary
+        total_tests = sum(r.get('summary', {}).get('total', 0) for r in all_results)
+        total_passed = sum(r.get('summary', {}).get('passed', 0) for r in all_results)
+        total_failed = sum(r.get('summary', {}).get('failed', 0) for r in all_results)
+        total_skipped = sum(r.get('summary', {}).get('skipped', 0) for r in all_results)
+        
+        pass_rate = (total_passed / total_tests * 100) if total_tests > 0 else 0
+        
+        summary = {
+            'total_configurations': len(all_results),
+            'total_tests': total_tests,
+            'passed': total_passed,
+            'failed': total_failed,
+            'skipped': total_skipped,
+            'pass_rate': round(pass_rate, 2),
+            'configurations': all_results
+        }
+        
+        # Write summary
+        with open('test-summary.json', 'w') as f:
+            json.dump(summary, f, indent=2)
+        
+        print(f'=== Test Execution Summary ===')
+        print(f'Total Configurations Tested: {len(all_results)}')
+        print(f'Total Tests: {total_tests}')
+        print(f'Passed: {total_passed}')
+        print(f'Failed: {total_failed}')
+        print(f'Skipped: {total_skipped}')
+        print(f'Pass Rate: {pass_rate:.2f}%')
+        "
+    
+    - name: Upload aggregated summary
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: test-execution-summary
+        path: test-summary.json
+        retention-days: 30
+    
+    - name: Comment PR with test results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          try {
+            const summary = JSON.parse(fs.readFileSync('test-summary.json', 'utf8'));
+            const comment = `
+          ## 🧪 Test Execution Summary
+          
+          **Total Configurations:** ${summary.total_configurations}
+          **Total Tests:** ${summary.total_tests}
+          **Pass Rate:** ${summary.pass_rate}%
+          
+          | Status | Count |
+          |--------|-------|
+          | ✅ Passed | ${summary.passed} |
+          | ❌ Failed | ${summary.failed} |
+          | ⏭️ Skipped | ${summary.skipped} |
+          
+          ### Configuration Results:
+          ${summary.configurations.map(config => 
+            `- **${config.browser.toUpperCase()} + Python ${config.python_version}**: ${config.summary.passed}/${config.summary.total} passed (${((config.summary.passed/config.summary.total)*100).toFixed(1)}%)`
+          ).join('\n')}
+          
+          📊 Full reports available in the Actions artifacts.
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+          } catch (error) {
+            console.log('Error posting comment:', error);
+          }
+
+  # Performance monitoring job
+  performance-check:
+    needs: test
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download test artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: artifacts
+    
+    - name: Performance Analysis
+      run: |
+        python -c "
+        import json
+        import glob
+        
+        # Collect performance data from all test runs
+        performance_data = []
+        
+        for json_file in glob.glob('artifacts/*/reports/*json-report*.json'):
+            try:
+                with open(json_file, 'r') as f:
+                    data = json.load(f)
+                    browser = json_file.split('json-report-')[1].split('-py')[0]
+                    
+                    total_duration = data.get('duration', 0)
+                    test_count = data.get('summary', {}).get('total', 0)
+                    
+                    if test_count > 0:
+                        avg_test_time = total_duration / test_count
+                        performance_data.append({
+                            'browser': browser,
+                            'total_duration': round(total_duration, 2),
+                            'test_count': test_count,
+                            'avg_test_time': round(avg_test_time, 2),
+                            'tests_per_minute': round(60 / avg_test_time, 2) if avg_test_time > 0 else 0
+                        })
+            except Exception as e:
+                print(f'Error processing {json_file}: {e}')
+        
+        print('=== Performance Analysis ===')
+        for perf in sorted(performance_data, key=lambda x: x['total_duration']):
+            print(f'{perf[\"browser\"].upper()}: {perf[\"total_duration\"]}s total, {perf[\"avg_test_time\"]}s avg/test, {perf[\"tests_per_minute\"]} tests/min')
+        
+        # Check for performance regressions (simple threshold check)
+        slow_browsers = [p for p in performance_data if p['avg_test_time'] > 30]  # 30 seconds per test threshold
+        if slow_browsers:
+            print('⚠️  Performance Warning: Slow test execution detected:')
+            for browser in slow_browsers:
+                print(f'  - {browser[\"browser\"].upper()}: {browser[\"avg_test_time\"]}s average per test')
+        else:
+            print('✅ Performance: All browsers within acceptable thresholds')
+        "

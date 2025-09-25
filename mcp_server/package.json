@@ -1,0 +1,22 @@
+{
+  "name": "selenium-pytest-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for Selenium PyTest Test Automation Framework",
+  "main": "server.py",
+  "scripts": {
+    "start": "python server.py",
+    "dev": "python server.py --dev"
+  },
+  "dependencies": {
+    "mcp": "^1.0.0"
+  },
+  "keywords": [
+    "mcp",
+    "selenium",
+    "pytest", 
+    "test-automation",
+    "page-object-model"
+  ],
+  "author": "Test Automation Framework",
+  "license": "MIT"
+}
