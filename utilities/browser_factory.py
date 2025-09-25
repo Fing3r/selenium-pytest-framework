@@ -101,7 +101,7 @@ class BrowserFactory:
     def _create_firefox_browser(headless: bool = False, 
                                window_size: tuple = (1920, 1080)) -> webdriver.Firefox:
         """
-        Create Firefox browser instance with optimized settings.
+        Create Firefox browser instance with optimized settings for CI/CD environments.
         
         Args:
             headless (bool): Whether to run browser in headless mode
@@ -112,34 +112,90 @@ class BrowserFactory:
         """
         firefox_options = FirefoxOptions()
         
+        # Essential CI/CD environment settings
+        firefox_options.add_argument("--no-sandbox")
+        firefox_options.add_argument("--disable-dev-shm-usage")
+        firefox_options.add_argument("--disable-gpu")
+        firefox_options.add_argument("--disable-software-rasterizer")
+        
+        # Headless mode (always enable in CI, force headless if environment variable is set)
+        import os
+        if headless or os.getenv('HEADLESS') == 'true' or os.getenv('CI'):
+            firefox_options.add_argument("--headless")
+            logging.info("Firefox running in headless mode")
+        
+        # Window management - set before starting for consistent behavior
+        firefox_options.add_argument(f"--width={window_size[0]}")
+        firefox_options.add_argument(f"--height={window_size[1]}")
+        
         # Performance optimizations
         firefox_options.set_preference("browser.cache.disk.enable", False)
         firefox_options.set_preference("browser.cache.memory.enable", False)
         firefox_options.set_preference("browser.cache.offline.enable", False)
         firefox_options.set_preference("network.http.use-cache", False)
-        firefox_options.set_preference("permissions.default.image", 2)
-        firefox_options.set_preference("javascript.enabled", False)
+        firefox_options.set_preference("permissions.default.image", 2)  # Block images for speed
+        firefox_options.set_preference("javascript.enabled", False)  # Disable JS if not needed
         
-        # Window management
-        firefox_options.add_argument(f"--width={window_size[0]}")
-        firefox_options.add_argument(f"--height={window_size[1]}")
+        # Marionette and connection stability settings
+        firefox_options.set_preference("marionette.port", 2828)  # Fixed port to avoid conflicts
+        firefox_options.set_preference("marionette.log.level", "Info")
+        firefox_options.set_preference("remote.log.level", "Info")
         
-        # Headless mode
-        if headless:
-            firefox_options.add_argument("--headless")
-        
-        # Additional stability options
+        # Security and stability preferences for CI environments
         firefox_options.set_preference("security.tls.insecure_fallback_hosts", "localhost")
         firefox_options.set_preference("security.tls.hello_downgrade_check", False)
+        firefox_options.set_preference("browser.safebrowsing.enabled", False)
+        firefox_options.set_preference("browser.safebrowsing.malware.enabled", False)
+        
+        # Disable update checks and crash reporting
+        firefox_options.set_preference("app.update.enabled", False)
+        firefox_options.set_preference("app.update.auto", False)
+        firefox_options.set_preference("toolkit.crashreporter.enabled", False)
+        firefox_options.set_preference("datareporting.healthreport.uploadEnabled", False)
+        
+        # Media and notification preferences for CI stability
+        firefox_options.set_preference("media.volume_scale", "0.0")
+        firefox_options.set_preference("dom.push.enabled", False)
+        firefox_options.set_preference("dom.webnotifications.enabled", False)
+        
+        # Profile directory settings for CI environments
+        firefox_options.set_preference("browser.download.folderList", 2)
+        firefox_options.set_preference("browser.download.manager.showWhenStarting", False)
+        firefox_options.set_preference("browser.download.dir", "/tmp")
         
         try:
-            service = FirefoxService(GeckoDriverManager().install())
+            # Create service with additional timeout for CI environments
+            service = FirefoxService(
+                executable_path=GeckoDriverManager().install(),
+                log_path="/tmp/geckodriver.log"
+            )
+            
+            # Create Firefox instance with extended timeout
             driver = webdriver.Firefox(service=service, options=firefox_options)
-            driver.maximize_window()
-            logging.info("Firefox browser initialized successfully")
+            
+            # Set timeouts for stability
+            driver.set_page_load_timeout(30)
+            driver.implicitly_wait(10)
+            
+            # Maximize window after creation for consistency
+            try:
+                driver.maximize_window()
+            except Exception as e:
+                logging.warning(f"Could not maximize Firefox window: {e}")
+                # Fallback to manual window sizing
+                driver.set_window_size(window_size[0], window_size[1])
+            
+            logging.info("Firefox browser initialized successfully for CI/CD environment")
             return driver
+            
         except Exception as e:
             logging.error(f"Failed to initialize Firefox browser: {str(e)}")
+            # Log additional debugging information
+            logging.error("Firefox initialization failed. Common causes in CI:")
+            logging.error("1. Missing system dependencies (X11 libraries)")
+            logging.error("2. Marionette port conflicts")
+            logging.error("3. Insufficient display/Xvfb setup")
+            logging.error("4. Firefox version compatibility with GeckoDriver")
             raise
     
     @staticmethod
